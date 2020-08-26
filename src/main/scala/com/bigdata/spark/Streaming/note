@@ -1,0 +1,6 @@
+spark2.11
+kafka_2.11-0.11.0.2
+
+RDD算子之外的代码是在driver端执行的，算子之内的代码是在excutor端执行的。
+
+updateStateByKey()
