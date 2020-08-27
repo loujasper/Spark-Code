@@ -4,3 +4,31 @@ kafka_2.11-0.11.0.2
 RDD算子之外的代码是在driver端执行的，算子之内的代码是在excutor端执行的。
 
 updateStateByKey()
+
+
+org.apache.spark.SparkException: Task not serializable
+Caused by: java.io.NotSerializableException: com.alibaba.druid.pool.DruidPooledConnection
+原因此种错误有可能是RDD里布的计算是在excutor端执行的，外部是在driver端执行的。需要将对象传到excutor端
+
+--数据库的连接对象是无法序列化的。
+    利用rdd.foreachPartition()方法，此方法是针对每个分区做循环。
+    可将rdd.forerach 替换为 rdd.foreachPartition()
+    rdd.forerach优化，不要将数据库连接对象放在此方法中。
+    rdd内部是在excutor端执行的，rdd的外部是在driver端执行的。
+    
+DStream:离散化流  direct模式、
+拿到一个离散化流，会每个周期产生一个RDD，每一个RDD经过离散化流之后进行相应处理。
+
+为什么是周期：因为sparkStreaming有window操作方法，
+window（windowLength, slideInterval） 对源DStream批次计算返回一个新的DStream。
+windowLength,slideInterval 这两个参数必须是周期的倍数关系。否则会报错。
+
+
+有状态：每一个RDD计算结果会保存下来。
+
+无状态：每一个RDD计算结果不会保存下来，计算之后就数据就消失了。
+
+
+
+
+
