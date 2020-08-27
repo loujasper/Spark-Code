@@ -58,6 +58,134 @@ class BlackListService extends TService{
     )
 
 //    TODO 周期性获取黑名单的信息，判断当前用户的点击数据是否在黑名单中
+    val reduceDS: DStream[((String, String, String), Int)] = logDS.transform(
+
+      rdd => {
+//        CODE ：transform中的会周期性执行，没采集一份数据就会形成一个RDD，就会执行这段代码
+//        TODO 读取mysql数据库获取黑名单信息
+//        TODO JDBC
+        val connection: Connection = JDBCUtil.getConnection()
+
+//        TODO 执行SQL
+        val pstat: PreparedStatement = connection.prepareStatement(
+          """
+          select userid from black_list
+          """.stripMargin)
+
+//        TODO 获取查询结果
+        val rs: ResultSet = pstat.executeQuery()
+
+//        TODO 利用ListBuffer 获取黑名单ID集合
+        val blackIds = ListBuffer[String]()
+
+//        TODO 循环遍历
+        while (rs.next()) {
+          blackIds.append(rs.getString(1))
+        }
+
+        rs.close()
+        pstat.close()
+        connection.close()
+
+//        TODO 如果用户在黑名单中，那么将数据过滤掉，不会进行统计
+        val filterRDD = rdd.filter(
+          log => {
+            !blackIds.contains(log.userid)
+          })
+
+//        TODO 将正常数据进行点击的统计 格式转换利用map算子将数据拼接
+        /**
+          * key = day-userid-adid
+          * (day-userid-adid,1) => (day-userid-adid, sum)
+          *
+          */
+        val sdf = new SimpleDateFormat("yyyy-MM-dd") //格式化日期
+
+        val mapRDD = filterRDD.map(
+          log => {
+            val date = new Date(log.ts.toLong)
+            ((sdf.format(date), log.userid, log.adid), 1)
+          }
+        )
+
+//    TODO 将正常数据进行点击的统计
+        mapRDD.reduceByKey(_ + _)
+      }
+    )
+
+
+//    TODO 将统计的结果中超过阀值的用户信息拉入到黑名单中。
+    reduceDS.foreachRDD(
+      rdd => {
+//        rdd.foreachPartition() 以分区为单位对数据进行遍历
+
+        rdd.foreachPartition(
+          datas => {
+            val conn = JDBCUtil.getConnection()
+            val pstat = conn.prepareStatement( //插入数据如果有重复的key则更新count
+              """
+                insert into user_ad_count(dt,userid,adid,count)
+                values(?,?,?,?)
+                on duplicate key
+                update count = count + ?
+              """.stripMargin)
+
+            val pstat1 = conn.prepareStatement( //插入数据如果有重复的key则更新count
+              """
+                insert into black_list(userid)
+                select userid from user_ad_count
+                where dt = ? and userid = ? and adid = ?
+                and count >= 100
+                on duplicate key
+                update userid = ?
+              """.stripMargin)
+
+          datas.foreach{
+            case ((day, userid, adid), sum) => {
+              pstat.setString(1, day) //一共5个？，所以插入五个数据
+              pstat.setString(2, userid)
+              pstat.setString(3, adid)
+              pstat.setLong(4, sum)
+              pstat.setLong(5, sum)
+              pstat.executeUpdate()
+
+              pstat1.setString(1, day)
+              pstat1.setString(2, userid)
+              pstat1.setString(3, adid)
+              pstat1.setString(4, userid)
+              pstat1.executeUpdate()
+            }
+          }
+          pstat.close()
+          pstat1.close()
+          conn.close()
+        }
+
+      )
+    }
+  )
+    ds.print()
+  }
+
+
+
+
+
+def analysis2() = {
+
+//    TODO 读取Kafka的数据
+    val ds: DStream[String] = blackListDao.readKafka()
+
+
+//    TODO 将数据转换为样例类来使用
+    val logDS = ds.map(
+      data => {
+        val datas = data.split(" ")
+        Ad_Click_log(datas(0), datas(1), datas(2), datas(3), datas(4))
+      }
+    )
+
+//    TODO 周期性获取黑名单的信息，判断当前用户的点击数据是否在黑名单中
 
     val reduceDS: DStream[((String, String, String), Int)] = logDS.transform(
 
@@ -118,13 +246,141 @@ class BlackListService extends TService{
 //    TODO 将统计的结果中超过阀值的用户信息拉入到黑名单中。
     reduceDS.foreachRDD(
       rdd => {
+
+        val conn = JDBCUtil.getConnection()
+        val pstat = conn.prepareStatement( //插入数据如果有重复的key则更新count
+          """
+                insert into user_ad_count(dt,userid,adid,count)
+                values(?,?,?,?)
+                on duplicate key
+                update count = count + ?
+              """.stripMargin)
+
+        val pstat1 = conn.prepareStatement( //插入数据如果有重复的key则更新count
+          """
+                insert into black_list(userid)
+                select userid from user_ad_count
+                where dt = ? and userid = ? and adid = ?
+                and count >= 100
+                on duplicate key
+                update userid = ?
+              """.stripMargin)
+
         rdd.foreach {
-//              TODO data 是每一个采集周期中用户点击同一个广告的数量
+//      TODO data 是每一个采集周期中用户点击同一个广告的数量
 
           case ((day, userid, adid), sum) => {
-//              TODO 有状态保存sparkstreaming-->updateStateByKey=>checkpoint=>HDFS=>产生大量的小文件
-//              TODO 所以统计结果放在mysql中。(redis有数据过期自动删除功能)
-//              TODO 更新(新增)用户点击数量
+//          TODO 有状态保存sparkstreaming-->updateStateByKey=>checkpoint=>HDFS=>产生大量的小文件
+//          TODO 所以统计结果放在mysql中。(redis有数据过期自动删除功能)
+//          TODO 更新(新增)用户点击数量
+            pstat.setString(1, day) //一共5个？，所以插入五个数据
+            pstat.setString(2, userid)
+            pstat.setString(3, adid)
+            pstat.setLong(4, sum)
+            pstat.setLong(5, sum)
+            pstat.executeUpdate()
+
+//          TODO 获取最新的用户统计数据
+//          TODO 是否超过阀值，如果超过阀值，则拉入黑名单
+            pstat1.setString(1, day)
+            pstat1.setString(2, userid)
+            pstat1.setString(3, adid)
+            pstat1.setString(4, userid)
+            pstat1.executeUpdate()
+
+            pstat.close()
+            pstat1.close()
+            conn.close()
+          }
+        }
+      }
+    )
+    ds.print()
+  }
+
+
+   def analysis1() = {
+
+//    TODO 读取Kafka的数据
+    val ds: DStream[String] = blackListDao.readKafka()
+
+
+//    TODO 将数据转换为样例类来使用
+    val logDS = ds.map(
+      data => {
+        val datas = data.split(" ")
+        Ad_Click_log(datas(0), datas(1), datas(2), datas(3), datas(4))
+      }
+    )
+
+    //    TODO 周期性获取黑名单的信息，判断当前用户的点击数据是否在黑名单中
+
+    val reduceDS: DStream[((String, String, String), Int)] = logDS.transform(
+
+      rdd => {
+        //        CODE ：transform中的会周期性执行，没采集一份数据就会形成一个RDD，就会执行这段代码
+        //        TODO 读取mysql数据库获取黑名单信息
+        //        TODO JDBC
+        val connection: Connection = JDBCUtil.getConnection()
+
+        //        TODO 执行SQL
+        val pstat: PreparedStatement = connection.prepareStatement(
+          """
+          select userid from black_list
+          """.stripMargin)
+
+        //        TODO 获取查询结果
+        val rs: ResultSet = pstat.executeQuery()
+
+        //        TODO 利用ListBuffer 获取黑名单ID集合
+        val blackIds = ListBuffer[String]()
+
+        //        TODO 循环遍历
+        while (rs.next()) {
+          blackIds.append(rs.getString(1))
+        }
+
+        rs.close()
+        pstat.close()
+        connection.close()
+
+        //    TODO 如果用户在黑名单中，那么将数据过滤掉，不会进行统计
+        val filterRDD = rdd.filter(
+          log => {
+            !blackIds.contains(log.userid)
+          })
+
+        //    TODO 将正常数据进行点击的统计 格式转换利用map算子将数据拼接
+        /**
+          * key = day-userid-adid
+          * (day-userid-adid,1) => (day-userid-adid, sum)
+          *
+          */
+        val sdf = new SimpleDateFormat("yyyy-MM-dd") //格式化日期
+
+        val mapRDD = filterRDD.map(
+          log => {
+            val date = new Date(log.ts.toLong)
+            ((sdf.format(date), log.userid, log.adid), 1)
+          }
+        )
+
+        //    TODO 将正常数据进行点击的统计
+        mapRDD.reduceByKey(_ + _)
+      }
+    )
+
+
+    //    TODO 将统计的结果中超过阀值的用户信息拉入到黑名单中。
+    reduceDS.foreachRDD(
+      rdd => {
+        rdd.foreach {
+          //              TODO data 是每一个采集周期中用户点击同一个广告的数量
+
+          case ((day, userid, adid), sum) => {
+            //              TODO 有状态保存sparkstreaming-->updateStateByKey=>checkpoint=>HDFS=>产生大量的小文件
+            //              TODO 所以统计结果放在mysql中。(redis有数据过期自动删除功能)
+            //              TODO 更新(新增)用户点击数量
             val conn = JDBCUtil.getConnection()
             val pstat = conn.prepareStatement( //插入数据如果有重复的key则更新count
               """
@@ -141,8 +397,8 @@ class BlackListService extends TService{
             pstat.setLong(5, sum)
             pstat.executeUpdate()
 
-//              TODO 获取最新的用户统计数据
-//              TODO 是否超过阀值，如果超过阀值，则拉入黑名单
+            //              TODO 获取最新的用户统计数据
+            //              TODO 是否超过阀值，如果超过阀值，则拉入黑名单
             val pstat1 = conn.prepareStatement( //插入数据如果有重复的key则更新count
               """
                 insert into black_list(userid)
